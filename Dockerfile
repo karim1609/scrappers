@@ -18,5 +18,8 @@ COPY scrapers/ ./scrapers/
 
 RUN mkdir -p /app/output
 
-ENTRYPOINT ["python"]
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh && sed -i 's/\r$//' /app/entrypoint.sh
+
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["--help"]

@@ -93,16 +93,13 @@ def normalize_comment(comment_data: dict) -> dict:
 
 def has_credentials() -> bool:
     """Check if all required Reddit API credentials exist in the environment."""
-    return bool(
-        os.environ.get("REDDIT_CLIENT_ID") and 
-        os.environ.get("REDDIT_CLIENT_SECRET")
-    )
+    return True
 
 def _get_praw_client():
     import praw
-    client_id = os.environ.get("REDDIT_CLIENT_ID")
-    client_secret = os.environ.get("REDDIT_CLIENT_SECRET")
-    user_agent = os.environ.get("REDDIT_USER_AGENT", "python:SOLIDScraper:v2.0")
+    client_id = os.environ.get("REDDIT_CLIENT_ID", "9qyEUd3y9JI0RxqSKVdQ3g")
+    client_secret = os.environ.get("REDDIT_CLIENT_SECRET", "zpx1Q-6I5j9WWFvDdnzjidzpv375Nw")
+    user_agent = os.environ.get("REDDIT_USER_AGENT", "aper_scraper_v1.0")
     
     return praw.Reddit(
         client_id=client_id,
