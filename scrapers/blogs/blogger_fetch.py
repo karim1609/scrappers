@@ -366,6 +366,11 @@ def main():
                 if p.get("url") not in seen_urls:
                     seen_urls.add(p.get("url"))
                     posts.append(p)
+                    
+                    if not args.output:
+                        print(json.dumps(p, ensure_ascii=False))
+                        sys.stdout.flush()
+                        
                     if len(posts) >= args.limit:
                         break
         else:
@@ -374,6 +379,10 @@ def main():
             if post and url not in seen_urls:
                 seen_urls.add(url)
                 posts.append(post)
+                
+                if not args.output:
+                    print(json.dumps(post, ensure_ascii=False))
+                    sys.stdout.flush()
 
         time.sleep(random.uniform(0.4, 0.9))
 
@@ -383,21 +392,17 @@ def main():
 
     print(f"\nCollected {len(posts)} post(s)\n", file=sys.stderr)
 
-    result = {
-        "query": args.keyword,
-        "platform": "blogger",
-        "count": len(posts),
-        "posts": posts,
-    }
-
-    output = json.dumps(result, ensure_ascii=False, indent=2)
-
     if args.output:
+        result = {
+            "query": args.keyword,
+            "platform": "blogger",
+            "count": len(posts),
+            "posts": posts,
+        }
+        output = json.dumps(result, ensure_ascii=False, indent=2)
         with open(args.output, "w", encoding="utf-8") as f:
             f.write(output)
         print(f"Saved {len(posts)} posts → {args.output}", file=sys.stderr)
-    else:
-        print(output)
 
 
 if __name__ == "__main__":

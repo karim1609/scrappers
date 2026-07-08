@@ -408,24 +408,26 @@ def main():
         print(f"  [{i}/{len(article_urls)}] {url}", file=sys.stderr)
         article = scrape_article(url)
         articles.append(article)
+        
+        if not args.output:
+            # Stream directly to stdout in real-time (JSON Lines format)
+            print(json.dumps(article, ensure_ascii=False))
+            sys.stdout.flush()
+            
         time.sleep(random.uniform(0.4, 0.9))
 
-    result = {
-        "query": args.keyword,
-        "platform": "bbc",
-        "strategy": strategy,
-        "count": len(articles),
-        "articles": articles,
-    }
-
-    output = json.dumps(result, ensure_ascii=False, indent=2)
-
     if args.output:
+        result = {
+            "query": args.keyword,
+            "platform": "bbc",
+            "strategy": strategy,
+            "count": len(articles),
+            "articles": articles,
+        }
+        output = json.dumps(result, ensure_ascii=False, indent=2)
         with open(args.output, "w", encoding="utf-8") as f:
             f.write(output)
         print(f"\nSaved {len(articles)} articles → {args.output}", file=sys.stderr)
-    else:
-        print(output)
 
 
 if __name__ == "__main__":

@@ -319,23 +319,24 @@ def main():
         print(f"  [{i}/{len(post_urls)}] {url}", file=sys.stderr)
         post = scrape_post(url)
         posts.append(post)
+        
+        if not args.output:
+            print(json.dumps(post, ensure_ascii=False))
+            sys.stdout.flush()
+            
         time.sleep(random.uniform(0.4, 0.9))
 
-    result = {
-        "query": args.keyword,
-        "platform": "substack",
-        "count": len(posts),
-        "posts": posts,
-    }
-
-    output = json.dumps(result, ensure_ascii=False, indent=2)
-
     if args.output:
+        result = {
+            "query": args.keyword,
+            "platform": "substack",
+            "count": len(posts),
+            "posts": posts,
+        }
+        output = json.dumps(result, ensure_ascii=False, indent=2)
         with open(args.output, "w", encoding="utf-8") as f:
             f.write(output)
         print(f"\nSaved {len(posts)} posts → {args.output}", file=sys.stderr)
-    else:
-        print(output)
 
 
 if __name__ == "__main__":
