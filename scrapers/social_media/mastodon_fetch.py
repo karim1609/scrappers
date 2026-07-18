@@ -157,27 +157,49 @@ def api_get(base_url: str, path: str, params: dict[str, Any] | None = None) -> A
 
 def fetch_by_hashtag(instance: str, tag: str, limit: int) -> list[dict[str, Any]]:
     tag = tag.lstrip("#")
-    statuses = api_get(instance, f"/api/v1/timelines/tag/{urllib.parse.quote(tag)}", {"limit": limit})
-    if not isinstance(statuses, list):
-        return []
-    return [normalize_status(status, instance) for status in statuses[:limit]]
+    all_statuses = []
+    max_id = None
+    
+    while len(all_statuses) < limit:
+        req_limit = min(40, limit - len(all_statuses))
+        params = {"limit": req_limit}
+        if max_id:
+            params["max_id"] = max_id
+            
+        statuses = api_get(instance, f"/api/v1/timelines/tag/{urllib.parse.quote(tag)}", params)
+        if not isinstance(statuses, list) or not statuses:
+            break
+            
+        all_statuses.extend(statuses)
+        max_id = statuses[-1]["id"]
+        
+        if len(statuses) < req_limit:
+            break # Reached the end of available posts
+            
+    return [normalize_status(status, instance) for status in all_statuses[:limit]]
 
 
 def fetch_by_search(instance: str, query: str, limit: int) -> list[dict[str, Any]]:
+    # Note: /api/v2/search requires authentication for paginated offsets. We limit to 40.
+    req_limit = min(limit, 40)
+    if limit > 40:
+        import sys
+        print(f"[Warning] Full-text search pagination is restricted without auth. Capping to {req_limit} posts.", file=sys.stderr)
+        
     payload = api_get(
         instance,
         "/api/v2/search",
         {
             "q": query,
             "type": "statuses",
-            "limit": limit,
+            "limit": req_limit,
             "resolve": "false",
         },
     )
     statuses = payload.get("statuses") if isinstance(payload, dict) else []
     if not isinstance(statuses, list):
         return []
-    return [normalize_status(status, instance) for status in statuses[:limit]]
+    return [normalize_status(status, instance) for status in statuses[:req_limit]]
 
 
 def fetch_posts(instance: str, keyword: str, limit: int, mode: str) -> dict[str, Any]:
@@ -206,6 +228,35 @@ def fetch_posts(instance: str, keyword: str, limit: int, mode: str) -> dict[str,
         "count": len(posts),
         "posts": posts,
     }
+
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scrapers.base import BaseScraper, ScraperConfig, ScraperResult
+
+
+class MastodonScraper(BaseScraper):
+    platform = "mastodon"
+    items_key = "posts"
+
+    def validate_config(self, config: ScraperConfig) -> None:
+        if not config.keyword.strip():
+            raise ValueError("keyword is required")
+
+    def scrape(self, config: ScraperConfig) -> ScraperResult:
+        self.validate_config(config)
+        instance = config.extra.get("instance", DEFAULT_INSTANCE)
+        mode = config.extra.get("mode", "auto")
+        result = fetch_posts(instance, config.keyword, config.limit, mode)
+        items = [self.normalize_item(post) for post in result.get("posts", [])]
+        return ScraperResult(
+            query=config.keyword,
+            platform=self.platform,
+            count=len(items),
+            items=items,
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -251,6 +302,8 @@ def main(argv: list[str] | None = None) -> int:
             handle.write(payload)
     else:
         print(payload)
+        print("\n\n")
+        print(len(result["posts"]))
 
     return 0
 

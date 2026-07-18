@@ -20,7 +20,10 @@ logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s", st
 logger = logging.getLogger(__name__)
 
 def retry_with_backoff(retries=3, backoff_in_seconds=2):
-    """Exponential backoff decorator for robust scraping."""
+    """
+    Décorateur customisé pour gérer les limites de l'API (Rate Limiting).
+    Augmente de façon exponentielle le temps d'attente à chaque échec pour éviter un blocage de l'API.
+    """
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -97,9 +100,12 @@ def has_credentials() -> bool:
 
 def _get_praw_client():
     import praw
-    client_id = os.environ.get("REDDIT_CLIENT_ID", "9qyEUd3y9JI0RxqSKVdQ3g")
-    client_secret = os.environ.get("REDDIT_CLIENT_SECRET", "zpx1Q-6I5j9WWFvDdnzjidzpv375Nw")
+    client_id = os.environ.get("REDDIT_CLIENT_ID")
+    client_secret = os.environ.get("REDDIT_CLIENT_SECRET")
     user_agent = os.environ.get("REDDIT_USER_AGENT", "aper_scraper_v1.0")
+    
+    if not client_id or not client_secret:
+        raise RuntimeError("REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET must be set in environment.")
     
     return praw.Reddit(
         client_id=client_id,
@@ -108,17 +114,22 @@ def _get_praw_client():
     )
 
 def collect_comments_api(submission, comment_limit: int) -> list:
-    """Retrieve comments via PRAW while preserving depth and parent relationships."""
+    """
+    Explore l'arbre des commentaires via PRAW. Garde en mémoire la 'profondeur' (depth) 
+    pour savoir qui a répondu à qui. Récupère récursivement les réponses des commentaires.
+    """
     if comment_limit <= 0:
         return []
         
     from praw.models import MoreComments
     
     logger.info(f"Retrieving comments for {submission.id}")
+    # Force l'API à se dérouler complètement sans limiter le nombre "MoreComments" cachés
     submission.comments.replace_more(limit=0)
     comments = []
     
     def traverse_comments(comment_list, depth=0):
+        # Fonction récursive naviguant de parent en enfant
         for comment in comment_list:
             if len(comments) >= comment_limit:
                 break
@@ -147,7 +158,11 @@ def collect_comments_api(submission, comment_limit: int) -> list:
 
 @retry_with_backoff(retries=3, backoff_in_seconds=2)
 def execute_praw_search(keyword: str, subreddit_name: str, sort: str, time_filter: str, limit: int, comment_limit: int) -> list:
-    """Execute the API call through PRAW and aggregate the results."""
+    """
+    Exécute la recherche de l'API Reddit via la librairie PRAW.
+    Convertit les objets complexes "submission" fournis par le paquet PRAW
+    en notre format standard JSON unifié.
+    """
     logger.info("Using Reddit API")
     logger.info(f"Searching r/{subreddit_name}")
     
@@ -210,6 +225,41 @@ def search(keyword: str, subreddit: str, sort: str, time_filter: str, limit: int
         logger.error("Reddit API request failed")
         logger.error(f"Reason: {e}")
         return []
+
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scrapers.base import BaseScraper, ScraperConfig, ScraperResult
+
+
+class RedditScraper(BaseScraper):
+    platform = "reddit"
+    items_key = "posts"
+
+    def validate_config(self, config: ScraperConfig) -> None:
+        if not config.keyword.strip():
+            raise ValueError("keyword is required")
+
+    def scrape(self, config: ScraperConfig) -> ScraperResult:
+        self.validate_config(config)
+        posts = search(
+            config.keyword,
+            config.extra.get("subreddit", "all"),
+            config.extra.get("sort", "relevance"),
+            config.extra.get("time_filter", "all"),
+            config.limit,
+            config.extra.get("comment_limit", 20),
+        )
+        items = [self.normalize_item(post) for post in posts]
+        return ScraperResult(
+            query=config.keyword,
+            platform=self.platform,
+            count=len(items),
+            items=items,
+        )
+
 
 def main():
     parser = argparse.ArgumentParser(description="Scrape Reddit strictly using the PRAW API.")

@@ -73,24 +73,68 @@ def strip_html(html: str) -> str:
 # ── Step 1: collect post URLs from Substack search ────────────────────────────
 
 
-def get_post_urls(keyword: str, limit: int) -> list[str]:
-    search_url = f"https://substack.com/search?q={urllib.parse.quote(keyword)}"
-    print(f"[Search] {search_url}", file=sys.stderr)
-
-    html = _render_with_playwright(search_url)
-    if not html:
-        return []
-
-    soup = BeautifulSoup(html, "html.parser")
+def get_post_urls(keyword: str, limit: int, api_key: str = None, cx: str = None) -> list[str]:
     urls = []
     seen = set()
 
-    # Substack post links: /p/<slug> on a subdomain, or substack.com/p/<slug>
+    # Attempt Google Custom Search if keys are present
+    if api_key and cx:
+        print(f"[Search] Querying Google Custom Search API for '{keyword}'...", file=sys.stderr)
+        try:
+            from googleapiclient.discovery import build
+            service = build("customsearch", "v1", developerKey=api_key, cache_discovery=False)
+            
+            for start_index in range(1, min(limit + 1, 101), 10):
+                req_limit = min(10, limit - len(urls))
+                if req_limit <= 0:
+                    break
+                    
+                res = service.cse().list(
+                    q=f'site:substack.com/p/ {keyword}',
+                    cx=cx,
+                    start=start_index,
+                    num=req_limit,
+                ).execute()
+                
+                items = res.get("items", [])
+                if not items:
+                    break
+                    
+                for item in items:
+                    href = item.get("link")
+                    if href and "/p/" in href:
+                        url = href.split("?")[0]
+                        if url not in seen:
+                            seen.add(url)
+                            urls.append(url)
+                            
+                if len(urls) >= limit:
+                    break
+                    
+                time.sleep(0.5)
+                
+            print(f"[Search] Found {len(urls)} post URL(s) via Google Custom Search", file=sys.stderr)
+            return urls
+            
+        except Exception as e:
+            print(f"[Search Engine API Error] {e}", file=sys.stderr)
+            print("[Search] Falling back to Substack native search...", file=sys.stderr)
+
+    # Fallback / Native Substack Search (Reliable via Playwright)
+    search_url = f"https://substack.com/search?q={urllib.parse.quote(keyword)}&focused=posts"
+    print(f"[Search] {search_url}", file=sys.stderr)
+    
+    html = _render_with_playwright(search_url, limit)
+    if not html:
+        return urls
+        
+    soup = BeautifulSoup(html, "html.parser")
     for a in soup.find_all("a", href=True):
         href = a["href"]
-        # Match: https://newsletter.substack.com/p/slug or https://substack.com/p/slug
-        if re.search(r"substack\.com/p/[a-z0-9_-]+", href):
+        if "/p/" in href:
             url = href.split("?")[0]
+            if not url.startswith("http"):
+                url = urllib.parse.urljoin("https://substack.com", url)
             if url not in seen:
                 seen.add(url)
                 urls.append(url)
@@ -101,7 +145,7 @@ def get_post_urls(keyword: str, limit: int) -> list[str]:
     return urls
 
 
-def _render_with_playwright(url: str, wait_ms: int = 4000) -> str | None:
+def _render_with_playwright(url: str, limit: int, wait_ms: int = 4000) -> str | None:
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -119,12 +163,38 @@ def _render_with_playwright(url: str, wait_ms: int = 4000) -> str | None:
                 ),
                 locale="en-US",
             )
-            page.goto(url, wait_until="networkidle", timeout=30000)
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(wait_ms)
-            # Scroll to load lazy results
-            for _ in range(3):
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                page.wait_for_timeout(1500)
+            
+            # Scroll dynamically based on requested limit
+            max_scrolls = (limit // 8) + 10
+            last_count = 0
+            
+            for scroll_idx in range(max_scrolls):
+                link_loc = page.locator("a[href*='/p/']")
+                count = link_loc.count()
+                
+                if count >= limit:
+                    break
+                    
+                if count > 0:
+                    link_loc.last.scroll_into_view_if_needed()
+                else:
+                    page.keyboard.press("End")
+                    
+                page.wait_for_timeout(2000)
+                
+                # If stuck, try jittering
+                if count > 0 and count == last_count and scroll_idx > 3:
+                    page.keyboard.press("PageUp")
+                    page.wait_for_timeout(500)
+                    page.keyboard.press("End")
+                    page.wait_for_timeout(2000)
+                    count2 = link_loc.count()
+                    if count2 == count:
+                        break
+                last_count = count
+                
             html = page.content()
             browser.close()
         return html
@@ -293,6 +363,56 @@ def _deep(d, *keys):
     return d
 
 
+import sys
+from pathlib import Path
+from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scrapers.base import BaseScraper, ScraperConfig, ScraperResult
+
+
+class SubstackScraper(BaseScraper):
+    platform = "substack"
+    items_key = "posts"
+
+    def validate_config(self, config: ScraperConfig) -> None:
+        if not config.keyword.strip():
+            raise ValueError("keyword is required")
+
+    def filter_strict(self, keyword: str, item: dict[str, Any]) -> bool:
+        if "error" in item:
+            return False
+        kw_lower = keyword.lower()
+        title = (item.get("title") or "").lower()
+        subtitle = (item.get("subtitle") or "").lower()
+        body = (item.get("body") or "").lower()
+        return kw_lower in title or kw_lower in subtitle or body.count(kw_lower) >= 2
+
+    def scrape(self, config: ScraperConfig) -> ScraperResult:
+        self.validate_config(config)
+        api_key = config.extra.get("google_api_key")
+        cx = config.extra.get("cx")
+        url_limit = config.limit * 3 if config.strict else config.limit
+        post_urls = get_post_urls(config.keyword, url_limit, api_key, cx)
+
+        posts = []
+        for url in post_urls:
+            post = scrape_post(url)
+            if config.strict and not self.filter_strict(config.keyword, post):
+                continue
+            posts.append(self.normalize_item(post))
+            if len(posts) >= config.limit:
+                break
+            time.sleep(random.uniform(0.4, 0.9))
+
+        return ScraperResult(
+            query=config.keyword,
+            platform=self.platform,
+            count=len(posts),
+            items=posts,
+        )
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 
@@ -303,26 +423,48 @@ def main():
     parser.add_argument("keyword", help="Keyword or topic, e.g. AI or 'climate change'")
     parser.add_argument("--limit", type=int, default=10, help="Max posts (default: 10)")
     parser.add_argument("--output", help="Save JSON to file (default: print to stdout)")
+    parser.add_argument("--strict", action="store_true", help="Only keep posts that mention the keyword in the title/subtitle, or multiple times in the body.")
+    parser.add_argument("--google-api-key", default="AIzaSyB-DQovimp0EF0_JYDXCXZAzJzotIVeVQw", help="Google API Key")
+    parser.add_argument("--cx", default=None, help="Google Custom Search Engine ID (CX)")
     args = parser.parse_args()
 
     print(f"\nSearching Substack for: '{args.keyword}'\n", file=sys.stderr)
 
-    post_urls = get_post_urls(args.keyword, args.limit)
+    post_urls = get_post_urls(args.keyword, args.limit * 3 if args.strict else args.limit, args.google_api_key, args.cx)
     if not post_urls:
         print("No posts found.", file=sys.stderr)
         sys.exit(1)
 
-    print(f"\nFetching {len(post_urls)} post(s)...\n", file=sys.stderr)
+    print(f"\nFetching posts (target limit {args.limit})...\n", file=sys.stderr)
 
     posts = []
+    kw_lower = args.keyword.lower()
+    
     for i, url in enumerate(post_urls, 1):
-        print(f"  [{i}/{len(post_urls)}] {url}", file=sys.stderr)
+        print(f"  [Checking {i}/{len(post_urls)}] {url}", file=sys.stderr)
         post = scrape_post(url)
+        
+        # Strict Relevance Filtering
+        if args.strict and "error" not in post:
+            title = (post.get("title") or "").lower()
+            subtitle = (post.get("subtitle") or "").lower()
+            body = (post.get("body") or "").lower()
+            
+            # Substack native search is broad. Strict mode requires the keyword in the title, 
+            # subtitle, or appearing at least twice in the actual body.
+            if kw_lower not in title and kw_lower not in subtitle and body.count(kw_lower) < 2:
+                print(f"    -> Skipped: '{args.keyword}' not prominent enough.", file=sys.stderr)
+                continue
+
         posts.append(post)
         
         if not args.output:
             print(json.dumps(post, ensure_ascii=False))
             sys.stdout.flush()
+            
+        if len(posts) >= args.limit:
+            print(f"\nReached target limit of {args.limit} strictly matched posts.", file=sys.stderr)
+            break
             
         time.sleep(random.uniform(0.4, 0.9))
 

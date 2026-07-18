@@ -18,6 +18,7 @@ Strategy:
 import argparse
 import json
 import sys
+import os
 import logging
 from typing import List, Dict, Any
 
@@ -31,16 +32,58 @@ logging.basicConfig(
 )
 log = logging.getLogger("youtube_fetch")
 
-# Official API Key provided by the user
-YOUTUBE_API_KEY = "AIzaSyDX8alMAxYALYk9TWR2gZ6zRcczH5AJV6s"
+# Key loaded from environment
+YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "")
 
 
-def scrape(keyword: str, limit: int, emit_fn) -> int:
+def fetch_video_comments(youtube, video_id: str, max_results: int = 10) -> list:
+    """Fetch top-level comments for a video."""
+    comments = []
+    if max_results <= 0:
+        return comments
+        
     try:
+        request = youtube.commentThreads().list(
+            part="snippet",
+            videoId=video_id,
+            maxResults=max_results,
+            textFormat="plainText"
+        )
+        response = request.execute()
+        
+        for item in response.get("items", []):
+            topLevelComment = item["snippet"]["topLevelComment"]["snippet"]
+            comments.append({
+                "author": topLevelComment.get("authorDisplayName", ""),
+                "text": topLevelComment.get("textDisplay", ""),
+                "like_count": topLevelComment.get("likeCount", 0),
+                "published_at": topLevelComment.get("publishedAt", "")
+            })
+    except HttpError as e:
+        # Silently handle videos with comments disabled
+        if e.resp.status in (403, 404):
+            pass
+        else:
+            log.warning(f"HTTP error fetching comments for {video_id}: {e}")
+    except Exception as e:
+        log.warning(f"Error fetching comments for {video_id}: {e}")
+        
+    return comments
+
+
+def scrape(keyword: str, limit: int, emit_fn, comment_limit: int = 10) -> int:
+    """
+    Fonction principale pour l'extraction de données de YouTube via son API officielle v3.
+    Prend un mot-clé, une limite et une fonction d'émission (pour envoyer les données au fur et à mesure).
+    """
+    count = 0
+    try:
+        # Vérification si la clé API a bien été fournie
+        if not YOUTUBE_API_KEY:
+            raise RuntimeError("YOUTUBE_API_KEY is not set.")
         # Build the youtube client
         youtube = build('youtube', 'v3', developerKey=YOUTUBE_API_KEY)
         
-        count = 0
         next_page_token = None
         
         # Max results per request is 50 for search
@@ -48,6 +91,7 @@ def scrape(keyword: str, limit: int, emit_fn) -> int:
             batch_size = min(50, limit - count)
             log.info(f"Fetching batch of size {batch_size} for keyword '{keyword}'...")
             
+            # Étape 1 : Récupérer d'abord les IDs et les 'snippets' (titre, description) des vidéos
             search_request = youtube.search().list(
                 q=keyword,
                 part="id,snippet",
@@ -65,7 +109,7 @@ def scrape(keyword: str, limit: int, emit_fn) -> int:
                 
             video_ids = [item["id"]["videoId"] for item in items]
             
-            # Fetch statistics (like viewCount) for the batch of videos
+            # Étape 2 : Un second appel API est nécessaire pour avoir le nombre de vues (statistiques)
             stats_request = youtube.videos().list(
                 part="statistics",
                 id=",".join(video_ids)
@@ -88,7 +132,8 @@ def scrape(keyword: str, limit: int, emit_fn) -> int:
                     "views": stats.get("viewCount", "0"),
                     "published": snippet.get("publishedAt", ""),
                     "description": snippet.get("description", ""),
-                    "platform": "youtube"
+                    "platform": "youtube",
+                    "comments": fetch_video_comments(youtube, video_id, comment_limit)
                 }
                 
                 emit_fn(video_data)
@@ -111,6 +156,45 @@ def scrape(keyword: str, limit: int, emit_fn) -> int:
         return count
 
 
+_scrape_videos = scrape
+
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scrapers.base import BaseScraper, ScraperConfig, ScraperResult
+
+
+class YouTubeScraper(BaseScraper):
+    """
+    Implémentation compatible avec la classe mère BaseScraper.
+    Configure le nom de la 'platform' ("youtube") et valide les pré-requis.
+    """
+    platform = "youtube"
+    items_key = "videos"
+
+    def validate_config(self, config: ScraperConfig) -> None:
+        if not config.keyword.strip():
+            raise ValueError("keyword is required")
+
+    def scrape(self, config: ScraperConfig) -> ScraperResult:
+        self.validate_config(config)
+        items: List[Dict[str, Any]] = []
+
+        def emit(video: dict) -> None:
+            items.append(self.normalize_item(video))
+
+        comment_limit = config.extra.get("comment_limit", 10)
+        count = _scrape_videos(config.keyword, config.limit, emit, comment_limit)
+        return ScraperResult(
+            query=config.keyword,
+            platform=self.platform,
+            count=count,
+            items=items,
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Scrape YouTube search results via API.")
     parser.add_argument("keyword", help="Brand keyword to search on YouTube (e.g. 'Apple')")
@@ -120,31 +204,29 @@ def main():
 
     log.info("Starting YouTube API scrape for %r (limit=%d)", args.keyword, args.limit)
 
+    config = ScraperConfig(
+        keyword=args.keyword,
+        limit=args.limit,
+        output_path=args.output,
+    )
+    scraper = YouTubeScraper()
+    
+    try:
+        result = scraper.scrape(config)
+    except Exception as e:
+        log.error("Scraping failed: %s", e)
+        sys.exit(1)
+
     if args.output:
-        collected: List[Dict[str, Any]] = []
-
-        def emit(video):
-            collected.append(video)
-            log.info("Collected video %d/%d", len(collected), args.limit)
-
-        count = scrape(args.keyword, args.limit, emit)
-
-        result = {
-            "query": args.keyword,
-            "platform": "youtube",
-            "count": count,
-            "videos": collected,
-        }
+        output_data = scraper.to_json(result)
         with open(args.output, "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
-        log.info("Wrote %d videos to %s", count, args.output)
+            json.dump(output_data, f, ensure_ascii=False, indent=2)
+        log.info("Wrote %d videos to %s", result.count, args.output)
     else:
-        def emit(video):
+        for video in result.items:
             print(json.dumps(video, ensure_ascii=False))
             sys.stdout.flush()
-
-        count = scrape(args.keyword, args.limit, emit)
-        log.info("Done. %d video(s) streamed.", count)
+        log.info("Done. %d video(s) retrieved.", result.count)
 
 
 if __name__ == "__main__":

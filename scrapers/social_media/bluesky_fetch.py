@@ -38,13 +38,10 @@ logging.basicConfig(
 log = logging.getLogger("bluesky_fetch")
 
 SEARCH_PAGE_SIZE = 25
-DEFAULT_HANDLE = "anouardev.bsky.social"
-DEFAULT_APP_PASSWORD = "Anaanoiar12"
-
 
 def get_credentials() -> tuple[str, str]:
-    handle = os.environ.get("BSKY_HANDLE", DEFAULT_HANDLE).strip()
-    password = os.environ.get("BSKY_APP_PASSWORD", DEFAULT_APP_PASSWORD).strip()
+    handle = os.environ.get("BSKY_HANDLE", "").strip()
+    password = os.environ.get("BSKY_APP_PASSWORD", "").strip()
     if not handle or not password:
         raise RuntimeError(
             "Bluesky credentials are required. Set BSKY_HANDLE and BSKY_APP_PASSWORD."
@@ -140,6 +137,40 @@ def search_posts(client, keyword: str, limit: int, emit_fn: Callable[[dict], Non
 def scrape(keyword: str, limit: int, emit_fn: Callable[[dict], None]) -> int:
     client = create_client()
     return search_posts(client, keyword, limit, emit_fn)
+
+
+_scrape_posts = scrape
+
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scrapers.base import BaseScraper, ScraperConfig, ScraperResult
+
+
+class BlueskyScraper(BaseScraper):
+    platform = "bluesky"
+    items_key = "posts"
+
+    def validate_config(self, config: ScraperConfig) -> None:
+        if not config.keyword.strip():
+            raise ValueError("keyword is required")
+
+    def scrape(self, config: ScraperConfig) -> ScraperResult:
+        self.validate_config(config)
+        items: List[Dict[str, Any]] = []
+
+        def emit(post: dict) -> None:
+            items.append(self.normalize_item(post))
+
+        count = _scrape_posts(config.keyword, config.limit, emit)
+        return ScraperResult(
+            query=config.keyword,
+            platform=self.platform,
+            count=count,
+            items=items,
+        )
 
 
 def main() -> int:

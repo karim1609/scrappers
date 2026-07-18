@@ -1,0 +1,15 @@
+# Secrets and Environments
+.env
+.venv/
+env/
+venv/
+ENV/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Outputs & Test files
+output/
+*.csv

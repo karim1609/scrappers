@@ -40,13 +40,12 @@ logging.basicConfig(
 log = logging.getLogger("gmaps_fetch")
 
 SERPAPI_BASE_URL = "https://serpapi.com/search"
-DEFAULT_API_KEY = "83daa33ba1304ef1e8d0b7664938c9d63d42d76f09a3d0e010c1e3bc3242d9ac"
 REQUEST_TIMEOUT = 30
 PAGE_DELAY_SECONDS = 2
 
 
 def get_api_key() -> str:
-    api_key = os.environ.get("SERPAPI_KEY", DEFAULT_API_KEY).strip()
+    api_key = os.environ.get("SERPAPI_KEY", "").strip()
     if not api_key:
         raise RuntimeError("SerpAPI key is required. Set the SERPAPI_KEY environment variable.")
     return api_key
@@ -215,6 +214,46 @@ def scrape(
     )
     count = fetch_reviews(place, keyword, api_key, limit, hl, sort_by, emit_fn)
     return place, count
+
+
+_scrape_reviews = scrape
+
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scrapers.base import BaseScraper, ScraperConfig, ScraperResult
+
+
+class GMapsScraper(BaseScraper):
+    platform = "google_maps"
+    items_key = "reviews"
+
+    def validate_config(self, config: ScraperConfig) -> None:
+        if not config.keyword.strip():
+            raise ValueError("keyword is required")
+
+    def scrape(self, config: ScraperConfig) -> ScraperResult:
+        self.validate_config(config)
+        items: List[Dict[str, Any]] = []
+
+        def emit(review: dict) -> None:
+            items.append(self.normalize_item(review))
+
+        _scrape_reviews(
+            config.keyword,
+            config.limit,
+            emit,
+            config.extra.get("hl", "fr"),
+            config.extra.get("sort_by", "newestFirst"),
+        )
+        return ScraperResult(
+            query=config.keyword,
+            platform=self.platform,
+            count=len(items),
+            items=items,
+        )
 
 
 def main() -> int:

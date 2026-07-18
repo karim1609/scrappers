@@ -177,6 +177,33 @@ def _normalize(post: dict) -> dict:
     }
 
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scrapers.base import BaseScraper, ScraperConfig, ScraperResult
+
+
+class WordPressScraper(BaseScraper):
+    platform = "wordpress"
+    items_key = "posts"
+
+    def validate_config(self, config: ScraperConfig) -> None:
+        if not config.keyword.strip():
+            raise ValueError("keyword is required")
+
+    def scrape(self, config: ScraperConfig) -> ScraperResult:
+        self.validate_config(config)
+        posts = fetch_posts(config.keyword, config.limit)
+        items = [self.normalize_item(post) for post in posts]
+        return ScraperResult(
+            query=config.keyword,
+            platform=self.platform,
+            count=len(items),
+            items=items,
+        )
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 

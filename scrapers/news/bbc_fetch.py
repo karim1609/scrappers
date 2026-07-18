@@ -375,6 +375,39 @@ def _deep(d: dict, *keys):
     return d
 
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scrapers.base import BaseScraper, ScraperConfig, ScraperResult
+
+
+class BbcScraper(BaseScraper):
+    platform = "bbc"
+    items_key = "articles"
+
+    def validate_config(self, config: ScraperConfig) -> None:
+        if not config.keyword.strip():
+            raise ValueError("keyword is required")
+
+    def scrape(self, config: ScraperConfig) -> ScraperResult:
+        self.validate_config(config)
+        article_urls, _strategy = get_article_urls(config.keyword, config.limit)
+        articles = []
+        for url in article_urls:
+            if len(articles) >= config.limit:
+                break
+            article = scrape_article(url)
+            articles.append(self.normalize_item(article))
+            time.sleep(random.uniform(0.4, 0.9))
+        return ScraperResult(
+            query=config.keyword,
+            platform=self.platform,
+            count=len(articles),
+            items=articles,
+        )
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 

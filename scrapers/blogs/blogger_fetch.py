@@ -18,6 +18,7 @@ import sys
 import time
 import urllib.parse
 import xml.etree.ElementTree as ET
+from typing import Any
 
 import requests
 from bs4 import BeautifulSoup
@@ -59,16 +60,59 @@ POPULAR_BLOGS = [
 # ── Step 1: find blogspot.com post URLs ───────────────────────────────────
 
 
-def find_post_urls(keyword: str, limit: int) -> list[str]:
+def find_post_urls(keyword: str, limit: int, api_key: str = None, cx: str = None) -> list[str]:
     """
     Two-step discovery:
-    1. Resolve Google News RSS results to find real blogspot.com URLs.
-    2. Search curated popular Blogger blogs' JSON feeds by keyword.
+    1. Attempt Google Custom Search API for highly accurate results.
+    2. Fallback to Google News RSS + Popular Blog endpoints.
     """
     urls = []
     seen = set()
 
-    # --- Strategy 1: Google News RSS → resolve redirects ---
+    # --- Strategy 1: Google Custom Search API (Highly Accurate) ---
+    if api_key and cx:
+        print(f"[Search Engine] Querying Google Custom Search API for '{keyword}'...", file=sys.stderr)
+        try:
+            from googleapiclient.discovery import build
+            service = build("customsearch", "v1", developerKey=api_key, cache_discovery=False)
+            
+            for start_index in range(1, min(limit + 1, 101), 10):
+                req_limit = min(10, limit - len(urls))
+                if req_limit <= 0:
+                    break
+                    
+                res = service.cse().list(
+                    q=f'site:blogspot.com {keyword}',
+                    cx=cx,
+                    start=start_index,
+                    num=req_limit,
+                ).execute()
+                
+                items = res.get("items", [])
+                if not items:
+                    break
+                    
+                for item in items:
+                    href = item.get("link")
+                    if href and "blogspot.com" in href:
+                        url = href.split("?")[0]
+                        if url not in seen:
+                            seen.add(url)
+                            urls.append(url)
+                            
+                if len(urls) >= limit:
+                    break
+                    
+                time.sleep(0.5)
+                
+            print(f"[Search] Found {len(urls)} post URL(s) via Google Custom Search", file=sys.stderr)
+            return urls
+            
+        except Exception as e:
+            print(f"[Search Engine API Error] {e}", file=sys.stderr)
+            print("[Search] Falling back to generic RSS checking...", file=sys.stderr)
+
+    # --- Strategy 2: Google News RSS → resolve redirects ---
     rss_url = (
         f"https://news.google.com/rss/search"
         f"?q={urllib.parse.quote(keyword)}"
@@ -102,7 +146,7 @@ def find_post_urls(keyword: str, limit: int) -> list[str]:
     except Exception as e:
         print(f"[Google News] Error: {e}", file=sys.stderr)
 
-    # --- Strategy 2: search popular blogs' JSON feeds ---
+    # --- Strategy 3: search popular blogs' JSON feeds ---
     if len(urls) < limit:
         print(
             f"[Blogger JSON feeds] Searching curated blogs for '{keyword}'...",
@@ -329,6 +373,73 @@ def _strip_html(html: str) -> str:
     return re.sub(r"\s{2,}", " ", text).strip()
 
 
+import sys
+from pathlib import Path
+from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scrapers.base import BaseScraper, ScraperConfig, ScraperResult
+
+
+class BloggerScraper(BaseScraper):
+    platform = "blogger"
+    items_key = "posts"
+
+    def validate_config(self, config: ScraperConfig) -> None:
+        if not config.keyword.strip():
+            raise ValueError("keyword is required")
+
+    def filter_strict(self, keyword: str, item: dict[str, Any]) -> bool:
+        kw_lower = keyword.lower()
+        title = (item.get("title") or "").lower()
+        body = (item.get("body") or "").lower()
+        return kw_lower in title or body.count(kw_lower) >= 2
+
+    def scrape(self, config: ScraperConfig) -> ScraperResult:
+        self.validate_config(config)
+        api_key = config.extra.get("google_api_key")
+        cx = config.extra.get("cx")
+        url_limit = config.limit * 3 if config.strict else config.limit
+        post_urls = find_post_urls(config.keyword, url_limit, api_key, cx)
+
+        posts = []
+        seen_urls = set()
+
+        for url in post_urls:
+            if len(posts) >= config.limit:
+                break
+
+            feed_posts = get_blog_json_feed(url, config.keyword)
+            scraped_any = False
+            if feed_posts:
+                for post in feed_posts:
+                    if config.strict and not self.filter_strict(config.keyword, post):
+                        continue
+                    post_url = post.get("url")
+                    if post_url not in seen_urls:
+                        seen_urls.add(post_url)
+                        posts.append(self.normalize_item(post))
+                        scraped_any = True
+                    if len(posts) >= config.limit:
+                        break
+
+            if not feed_posts or not scraped_any:
+                post = scrape_post_html(url)
+                if post and (not config.strict or self.filter_strict(config.keyword, post)):
+                    if url not in seen_urls:
+                        seen_urls.add(url)
+                        posts.append(self.normalize_item(post))
+
+            time.sleep(random.uniform(0.4, 0.9))
+
+        return ScraperResult(
+            query=config.keyword,
+            platform=self.platform,
+            count=len(posts),
+            items=posts,
+        )
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 
@@ -339,12 +450,15 @@ def main():
     parser.add_argument("keyword", help="Keyword or topic, e.g. AI or Morocco")
     parser.add_argument("--limit", type=int, default=10, help="Max posts (default: 10)")
     parser.add_argument("--output", help="Save JSON to file (default: print to stdout)")
+    parser.add_argument("--strict", action="store_true", help="Ensure posts mention keyword explicitly.")
+    parser.add_argument("--google-api-key", default="AIzaSyB-DQovimp0EF0_JYDXCXZAzJzotIVeVQw", help="Google API Developer Key")
+    parser.add_argument("--cx", default=None, help="Google Custom Search Engine ID (CX)")
     args = parser.parse_args()
 
     print(f"\nSearching Blogger for: '{args.keyword}'\n", file=sys.stderr)
 
     # Step 1: find post URLs
-    post_urls = find_post_urls(args.keyword, args.limit)
+    post_urls = find_post_urls(args.keyword, args.limit * 3 if args.strict else args.limit, args.google_api_key, args.cx)
     if not post_urls:
         print("No posts found.", file=sys.stderr)
         sys.exit(1)
@@ -352,6 +466,7 @@ def main():
     # Step 2: for each URL, try JSON feed first, then HTML scrape
     posts = []
     seen_urls = set()
+    kw_lower = args.keyword.lower()
 
     for url in post_urls:
         if len(posts) >= args.limit:
@@ -361,11 +476,22 @@ def main():
 
         # Try blog JSON feed (gives richer metadata)
         feed_posts = get_blog_json_feed(url, args.keyword)
+        
+        scraped_any = False
         if feed_posts:
             for p in feed_posts:
+                # Strict Check for JSON Output
+                title = (p.get("title") or "").lower()
+                body = (p.get("body") or "").lower()
+                
+                if args.strict and kw_lower not in title and body.count(kw_lower) < 2:
+                    print(f"    -> Skipped: '{args.keyword}' not prominent enough.", file=sys.stderr)
+                    continue
+                    
                 if p.get("url") not in seen_urls:
                     seen_urls.add(p.get("url"))
                     posts.append(p)
+                    scraped_any = True
                     
                     if not args.output:
                         print(json.dumps(p, ensure_ascii=False))
@@ -373,16 +499,27 @@ def main():
                         
                     if len(posts) >= args.limit:
                         break
-        else:
+        
+        if not feed_posts or not scraped_any:
             # Fallback to HTML scraping of the specific post
             post = scrape_post_html(url)
-            if post and url not in seen_urls:
-                seen_urls.add(url)
-                posts.append(post)
+            
+            # Strict Check for HTML Output
+            if post:
+                title = (post.get("title") or "").lower()
+                body = (post.get("body") or "").lower()
                 
-                if not args.output:
-                    print(json.dumps(post, ensure_ascii=False))
-                    sys.stdout.flush()
+                if args.strict and kw_lower not in title and body.count(kw_lower) < 2:
+                    print(f"    -> Skipped (Fallback): '{args.keyword}' not prominent enough.", file=sys.stderr)
+                    continue
+
+                if url not in seen_urls:
+                    seen_urls.add(url)
+                    posts.append(post)
+                    
+                    if not args.output:
+                        print(json.dumps(post, ensure_ascii=False))
+                        sys.stdout.flush()
 
         time.sleep(random.uniform(0.4, 0.9))
 

@@ -40,14 +40,13 @@ logging.basicConfig(
 log = logging.getLogger("newsapi_fetch")
 
 NEWSAPI_BASE_URL = "https://newsapi.org/v2/everything"
-DEFAULT_API_KEY = "f5110f2a00424378b6d21e3c2975441c"
 REQUEST_TIMEOUT = 30
 MAX_PAGE_SIZE = 100
 PAGE_DELAY_SECONDS = 0.5
 
 
 def get_api_key() -> str:
-    api_key = os.environ.get("NEWSAPI_KEY", DEFAULT_API_KEY).strip()
+    api_key = os.environ.get("NEWSAPI_KEY", "").strip()
     if not api_key:
         raise RuntimeError("NewsAPI key is required. Set the NEWSAPI_KEY environment variable.")
     return api_key
@@ -170,6 +169,48 @@ def scrape(
         date_to=date_to,
         emit_fn=emit_fn,
     )
+
+
+_scrape_articles = scrape
+
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scrapers.base import BaseScraper, ScraperConfig, ScraperResult
+
+
+class NewsApiScraper(BaseScraper):
+    platform = "newsapi"
+    items_key = "articles"
+
+    def validate_config(self, config: ScraperConfig) -> None:
+        if not config.keyword.strip():
+            raise ValueError("keyword is required")
+
+    def scrape(self, config: ScraperConfig) -> ScraperResult:
+        self.validate_config(config)
+        items: List[Dict[str, Any]] = []
+
+        def emit(article: dict) -> None:
+            items.append(self.normalize_item(article))
+
+        count = _scrape_articles(
+            config.keyword,
+            config.limit,
+            emit,
+            config.extra.get("language"),
+            config.extra.get("sort_by", "publishedAt"),
+            config.extra.get("date_from"),
+            config.extra.get("date_to"),
+        )
+        return ScraperResult(
+            query=config.keyword,
+            platform=self.platform,
+            count=count,
+            items=items,
+        )
 
 
 def main() -> int:

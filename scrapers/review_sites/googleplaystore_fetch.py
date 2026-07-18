@@ -206,6 +206,36 @@ def scrape_keyword(keyword: str, limit: int = 50) -> dict:
     }
 
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scrapers.base import BaseScraper, ScraperConfig, ScraperResult
+
+
+class GooglePlayStoreScraper(BaseScraper):
+    platform = "google_play"
+    items_key = "reviews"
+
+    def validate_config(self, config: ScraperConfig) -> None:
+        if not config.keyword.strip():
+            raise ValueError("keyword is required")
+
+    def scrape(self, config: ScraperConfig) -> ScraperResult:
+        self.validate_config(config)
+        bundle = scrape_keyword(config.keyword, config.limit)
+        items: list[dict] = []
+        for app_bundle in bundle.get("apps", []):
+            items.extend(app_bundle.get("reviews", []))
+        items = [self.normalize_item(item) for item in items]
+        return ScraperResult(
+            query=config.keyword,
+            platform=self.platform,
+            count=len(items),
+            items=items,
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Fetch Google Play reviews for the best matching app."
@@ -248,6 +278,8 @@ def main():
         print(f"Saved {results['count']} reviews to {args.output}", file=sys.stderr)
     else:
         print(output)
+        print(results['count'])
+        
 
 
 if __name__ == "__main__":

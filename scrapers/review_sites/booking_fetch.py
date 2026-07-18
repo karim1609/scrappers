@@ -882,6 +882,40 @@ def scrape(keyword: str, limit: int, emit_fn: Callable[[dict], None]) -> int:
             browser.close()
 
 
+_scrape_reviews = scrape
+
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scrapers.base import BaseScraper, ScraperConfig, ScraperResult
+
+
+class BookingScraper(BaseScraper):
+    platform = "booking"
+    items_key = "reviews"
+
+    def validate_config(self, config: ScraperConfig) -> None:
+        if not config.keyword.strip():
+            raise ValueError("keyword is required")
+
+    def scrape(self, config: ScraperConfig) -> ScraperResult:
+        self.validate_config(config)
+        items: List[Dict[str, Any]] = []
+
+        def emit(review: dict) -> None:
+            items.append(self.normalize_item(review))
+
+        count = _scrape_reviews(config.keyword, config.limit, emit)
+        return ScraperResult(
+            query=config.keyword,
+            platform=self.platform,
+            count=count,
+            items=items,
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Scrape Booking.com guest reviews.")
     parser.add_argument("keyword", help="Booking.com property URL or search keyword (e.g. 'Hilton London')")
