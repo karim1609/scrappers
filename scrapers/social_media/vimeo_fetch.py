@@ -22,12 +22,13 @@ from typing import Any
 
 import requests
 
+from scrapers.utils.env import get_required_env
+from scrapers.utils.http import request_with_retry
+
 API_BASE = "https://api.vimeo.com"
 SEARCH_ENDPOINT = f"{API_BASE}/videos"
 MAX_PAGE_SIZE = 100
 REQUEST_TIMEOUT = 30
-MAX_RETRIES = 5
-RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
 
 VIDEO_FIELDS = ",".join(
     [
@@ -58,10 +59,10 @@ HEADERS = {
 
 
 def get_access_token() -> str:
-    token = os.environ.get("VIMEO_ACCESS_TOKEN", "").strip()
-    if not token:
-        raise RuntimeError("VIMEO_ACCESS_TOKEN is not set. Please provide it in your environment.")
-    return token
+    return get_required_env(
+        "VIMEO_ACCESS_TOKEN", 
+        hint="generate a new personal access token at https://developer.vimeo.com/apps."
+    )
 
 
 def _video_id(uri: str | None) -> str:
@@ -129,54 +130,30 @@ def api_get(params: dict[str, Any], access_token: str, endpoint: str = SEARCH_EN
         **HEADERS,
         "Authorization": f"bearer {access_token}",
     }
-    last_error: Exception | None = None
 
-    for attempt in range(MAX_RETRIES):
-        try:
-            response = requests.get(
-                endpoint,
-                params=params,
-                headers=headers,
-                timeout=REQUEST_TIMEOUT,
-            )
-        except requests.Timeout as exc:
-            last_error = exc
-            wait = 2 ** attempt
-            print(f"[API] Timeout — retrying in {wait}s ({attempt + 1}/{MAX_RETRIES})", file=sys.stderr)
-            time.sleep(wait)
-            continue
-        except requests.RequestException as exc:
-            raise RuntimeError(f"Network error: {exc}") from exc
+    response = request_with_retry(
+        requests.get,
+        endpoint,
+        params=params,
+        headers=headers,
+        timeout=REQUEST_TIMEOUT,
+    )
 
-        if response.status_code in RETRY_STATUS_CODES:
-            wait = 2 ** attempt
-            print(
-                f"[API] HTTP {response.status_code} — retrying in {wait}s "
-                f"({attempt + 1}/{MAX_RETRIES})",
-                file=sys.stderr,
-            )
-            time.sleep(wait)
-            continue
+    if response.status_code == 401:
+        raise RuntimeError(
+            "Vimeo API returned 401 Unauthorized. Check VIMEO_ACCESS_TOKEN — "
+            "generate a new personal access token at https://developer.vimeo.com/apps."
+        )
 
-        if response.status_code == 401:
-            raise RuntimeError(
-                "Vimeo API returned 401 Unauthorized. Check VIMEO_ACCESS_TOKEN — "
-                "generate a new personal access token at https://developer.vimeo.com/apps."
-            )
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        raise RuntimeError(f"HTTP {response.status_code}: {_parse_api_error(response)}") from exc
 
-        try:
-            response.raise_for_status()
-        except requests.HTTPError as exc:
-            raise RuntimeError(f"HTTP {response.status_code}: {_parse_api_error(response)}") from exc
-
-        data = response.json()
-        if not isinstance(data, dict):
-            raise RuntimeError("Unexpected API response format")
-        return data
-
-    if last_error:
-        raise RuntimeError(f"Request timed out after {MAX_RETRIES} retries") from last_error
-    raise RuntimeError(f"Request failed after {MAX_RETRIES} retries")
+    data = response.json()
+    if not isinstance(data, dict):
+        raise RuntimeError("Unexpected API response format")
+    return data
 
 def fetch_comments(video_uri: str, access_token: str, max_comments: int = 15) -> list[dict[str, Any]]:
     if not video_uri:
